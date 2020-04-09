@@ -634,8 +634,8 @@ void explodeSocks(std::string link, const std::string &custom_port, nodeInfo &no
     {
         server = getUrlArg(link, "server");
         port = getUrlArg(link, "port");
-        username = getUrlArg(link, "user");
-        password = getUrlArg(link, "pass");
+        username = UrlDecode(getUrlArg(link, "user"));
+        password = UrlDecode(getUrlArg(link, "pass"));
         remarks = UrlDecode(getUrlArg(link, "remarks"));
         group = UrlDecode(getUrlArg(link, "group"));
     }
@@ -659,8 +659,8 @@ void explodeHTTP(std::string link, const std::string &custom_port, nodeInfo &nod
     std::string group, remarks, server, port, username, password;
     server = getUrlArg(link, "server");
     port = getUrlArg(link, "port");
-    username = getUrlArg(link, "user");
-    password = getUrlArg(link, "pass");
+    username = UrlDecode(getUrlArg(link, "user"));
+    password = UrlDecode(getUrlArg(link, "pass"));
     remarks = UrlDecode(getUrlArg(link, "remarks"));
     group = UrlDecode(getUrlArg(link, "group"));
 
@@ -1207,9 +1207,11 @@ bool explodeSurge(std::string surge, const std::string &custom_port, int local_p
 
     ini.store_isolated_line = true;
     ini.keep_empty_section = false;
+    ini.allow_dup_section_titles = true;
     ini.SetIsolatedItemsSection("Proxy");
     ini.IncludeSection("Proxy");
     ini.AddDirectSaveSection("Proxy");
+    surge = regReplace(surge, "^#!.*$\\r?\\n", "");
     ini.Parse(surge);
 
     if(!ini.SectionExist("Proxy"))

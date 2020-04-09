@@ -3,6 +3,7 @@
 #include <mutex>
 #include <numeric>
 
+#include <inja.hpp>
 #include <yaml-cpp/yaml.h>
 
 #include "misc.h"
@@ -87,12 +88,17 @@ std::string parseProxy(const std::string &source)
     return proxy;
 }
 
+#define basic_types "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "IP-CIDR", "SRC-IP-CIDR", "GEOIP", "MATCH", "FINAL"
+const string_array surge_rule_type = {basic_types, "IP-CIDR6", "USER-AGENT", "URL-REGEX", "AND", "OR", "NOT", "PROCESS-NAME", "IN-PORT", "DEST-PORT", "SRC-IP"};
+const string_array quanx_rule_type = {basic_types, "USER-AGENT", "URL-REGEX", "PROCESS-NAME", "HOST", "HOST-SUFFIX", "HOST-KEYWORD"};
+
 std::string getRuleset(RESPONSE_CALLBACK_ARGS)
 {
     std::string url = urlsafe_base64_decode(getUrlArg(argument, "url")), type = getUrlArg(argument, "type"), group = urlsafe_base64_decode(getUrlArg(argument, "group"));
     std::string output_content, dummy;
+    int type_int = to_int(type, 0);
 
-    if(!url.size() || !type.size() || (type == "2" && !group.size()) || (type != "1" && type != "2"))
+    if(!url.size() || !type.size() || (type_int == 2 && !group.size()) || (type_int != 1 && type_int != 2))
     {
         *status_code = 400;
         return "Invalid request!";
@@ -107,42 +113,43 @@ std::string getRuleset(RESPONSE_CALLBACK_ARGS)
         return "Invalid request!";
     }
 
-    if(type == "2")
+    std::string strLine;
+    std::stringstream ss;
+    const std::string rule_match_regex = "^(.*?,.*?)(,.*)(,.*)$";
+
+    ss << output_content;
+    char delimiter = count(output_content.begin(), output_content.end(), '\n') < 1 ? '\r' : '\n';
+    std::string::size_type lineSize;
+
+    output_content.clear();
+
+    while(getline(ss, strLine, delimiter))
     {
-        std::string strLine;
-        std::stringstream ss;
-        const std::string rule_match_regex = "^(.*?,.*?)(,.*)(,.*)$";
+        if(type_int == 2 && !std::any_of(quanx_rule_type.begin(), quanx_rule_type.end(), [strLine](std::string type){return startsWith(strLine, type);}))
+            continue;
+        else if(!std::any_of(surge_rule_type.begin(), surge_rule_type.end(), [strLine](std::string type){return startsWith(strLine, type);}))
+            continue;
 
-        ss << output_content;
-        char delimiter = count(output_content.begin(), output_content.end(), '\n') < 1 ? '\r' : '\n';
-        std::string::size_type lineSize;
-
-        output_content.clear();
-
-        while(getline(ss, strLine, delimiter))
+        lineSize = strLine.size();
+        if(lineSize && strLine[lineSize - 1] == '\r') //remove line break
         {
-            if(strLine.find("IP-CIDR6") == 0 || strLine.find("URL-REGEX") == 0 || strLine.find("PROCESS-NAME") == 0 || strLine.find("AND") == 0 || strLine.find("OR") == 0) //remove unsupported types
-                continue;
+            strLine.erase(lineSize - 1);
+            lineSize--;
+        }
 
-            lineSize = strLine.size();
-            if(lineSize && strLine[lineSize - 1] == '\r') //remove line break
-            {
-                strLine.erase(lineSize - 1);
-                lineSize--;
-            }
-
-            if(!strLine.empty() && (strLine[0] != ';' && strLine[0] != '#' && !(lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')))
+        if(!strLine.empty() && (strLine[0] != ';' && strLine[0] != '#' && !(lineSize >= 2 && strLine[0] == '/' && strLine[1] == '/')))
+        {
+            if(type_int == 2)
             {
                 strLine += "," + group;
-
                 if(std::count(strLine.begin(), strLine.end(), ',') > 2 && regReplace(strLine, rule_match_regex, "$2") == ",no-resolve")
                     strLine = regReplace(strLine, rule_match_regex, "$1$3$2");
                 else
                     strLine = regReplace(strLine, rule_match_regex, "$1$3");
             }
-
-            output_content.append(strLine + "\n");
         }
+
+        output_content.append(strLine + "\n");
     }
 
     return output_content;
@@ -250,13 +257,13 @@ void readEmoji(YAML::Node node, string_array &dest, bool scope_limit = true)
 
 void readGroup(YAML::Node node, string_array &dest, bool scope_limit = true)
 {
-    std::string strLine, name, type, url, interval;
     string_array tempArray;
     YAML::Node object;
     unsigned int i, j;
 
     for(i = 0; i < node.size(); i++)
     {
+        std::string strLine, name, type;
         name.clear();
         eraseElements(tempArray);
         object = node[i];
@@ -267,19 +274,21 @@ void readGroup(YAML::Node node, string_array &dest, bool scope_limit = true)
             dest.emplace_back(name);
             continue;
         }
-        url = "http://www.gstatic.com/generate_204", interval = "300";
+        std::string url = "http://www.gstatic.com/generate_204", interval = "300", tolerance, timeout;
         object["name"] >> name;
         object["type"] >> type;
         tempArray.emplace_back(name);
         tempArray.emplace_back(type);
         object["url"] >> url;
         object["interval"] >> interval;
+        object["tolerance"] >> tolerance;
+        object["timeout"] >> timeout;
         for(j = 0; j < object["rule"].size(); j++)
             tempArray.emplace_back(safe_as<std::string>(object["rule"][j]));
         if(type != "select" && type != "ssid")
         {
             tempArray.emplace_back(url);
-            tempArray.emplace_back(interval);
+            tempArray.emplace_back(interval + "," + timeout + "," + tolerance);
         }
 
         if((type == "select" && tempArray.size() < 3) || (type == "ssid" && tempArray.size() < 4) || (type != "select" && type != "ssid" && tempArray.size() < 5))
@@ -342,10 +351,11 @@ void refreshRulesets(string_array &ruleset_list, std::vector<ruleset_content> &r
         rule_group = trim(vArray[0]);
         rule_url = trim(vArray[1]);
         */
-        if(x.find(",") == x.npos)
+        string_size pos = x.find(",");
+        if(pos == x.npos)
             continue;
-        rule_group = trim(x.substr(0, x.find(",")));
-        rule_url = trim(x.substr(x.find(",") + 1));
+        rule_group = trim(x.substr(0, pos));
+        rule_url = trim(x.substr(pos + 1));
         if(rule_url.find("[]") == 0)
         {
             writeLog(0, "Adding rule '" + rule_url.substr(2) + "," + rule_group + "'.", LOG_LEVEL_INFO);
@@ -1878,6 +1888,42 @@ std::string getRewriteRemote(RESPONSE_CALLBACK_ARGS)
         }
     }
     return output_content;
+}
+
+std::string parseHostname(inja::Arguments &args)
+{
+    std::string data = args.at(0)->get<std::string>();
+    string_array urls = split(data, ",");
+    if(!urls.size())
+        return std::string();
+
+    std::string input_content, output_content, proxy = parseProxy(proxy_config);
+    for(std::string &x : urls)
+    {
+        input_content = webGet(x, proxy, cache_config);
+        output_content += regReplace(input_content, "(?:[\\s\\S]*?)^(?i:hostname\\s*?=\\s*?)(.*?)\\s$(?:[\\s\\S]*)", "$1") + ",";
+    }
+    string_array vArray = split(output_content, ",");
+    std::set<std::string> hostnames;
+    for(std::string &x : vArray)
+        hostnames.emplace(trim(x));
+    output_content = std::accumulate(hostnames.begin(), hostnames.end(), std::string(), [](std::string a, std::string b)
+    {
+        return std::move(a) + "," + std::move(b);
+    });
+    return output_content;
+}
+
+std::string template_webGet(inja::Arguments &args)
+{
+    std::string data = args.at(0)->get<std::string>(), proxy = parseProxy(proxy_config);
+    return webGet(data, proxy, cache_config);
+}
+
+std::string jinja2_webGet(const std::string &url)
+{
+    std::string proxy = parseProxy(proxy_config);
+    return webGet(url, proxy, cache_config);
 }
 
 static inline std::string intToStream(unsigned long long stream)
